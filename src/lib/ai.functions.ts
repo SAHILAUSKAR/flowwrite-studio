@@ -22,12 +22,72 @@ const SettingsSchema = z.object({
 export type FlowSettings = z.infer<typeof SettingsSchema>;
 
 export const getAiStatus = createServerFn({ method: "GET" }).handler(async () => {
-  return { configured: Boolean(process.env["LOVABLE_API_KEY"]) };
+  const hasGemini = Boolean(process.env["GEMINI_API_KEY"]);
+  const hasLovable = Boolean(process.env["LOVABLE_API_KEY"]);
+  return {
+    configured: hasGemini || hasLovable,
+    source: hasGemini ? ("gemini" as const) : hasLovable ? ("lovable" as const) : null,
+  };
 });
 
 type GatewayResult = { ok: true; content: string } | { ok: false; error: string };
 
+// Direct Google Gemini API using the user's own key.
+async function callGemini(system: string, user: string): Promise<GatewayResult> {
+  const key = process.env["GEMINI_API_KEY"];
+  if (!key) return { ok: false, error: "__no_key__" };
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: "user", parts: [{ text: user }] }],
+          generationConfig: { responseMimeType: "application/json" },
+        }),
+      },
+    );
+  } catch {
+    return { ok: false, error: "Network error while contacting the AI service. Please retry." };
+  }
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`Gemini API error [${res.status}]: ${body}`);
+    if (res.status === 400 && body.includes("API_KEY_INVALID"))
+      return { ok: false, error: "Your AI key was rejected. Check it in Project Settings → Secrets." };
+    if (res.status === 403)
+      return { ok: false, error: "Your AI key was rejected. Check it in Project Settings → Secrets." };
+    if (res.status === 429)
+      return { ok: false, error: "Too many requests right now. Wait a moment and try again." };
+    return { ok: false, error: `AI request failed (${res.status}). Please try again.` };
+  }
+
+  const data = (await res.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  const content = data.candidates?.[0]?.content?.parts
+    ?.map((p) => p.text ?? "")
+    .join("")
+    .trim();
+  if (!content) return { ok: false, error: "The AI returned an empty response. Please try again." };
+  return { ok: true, content };
+}
+
 async function callGateway(system: string, user: string): Promise<GatewayResult> {
+  // Prefer the user's own Gemini key; fall back to Lovable's built-in AI.
+  if (process.env["GEMINI_API_KEY"]) {
+    const geminiResult = await callGemini(system, user);
+    // On key rejection or rate limit, surface the real error instead of
+    // silently falling back — the user needs to know their key failed.
+    if (geminiResult.ok || !process.env["LOVABLE_API_KEY"]) return geminiResult;
+    if (geminiResult.error.includes("Your AI key was rejected")) return geminiResult;
+  }
+
   const key = process.env["LOVABLE_API_KEY"];
   if (!key) {
     return {
