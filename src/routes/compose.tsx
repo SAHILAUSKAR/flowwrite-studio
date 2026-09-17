@@ -277,6 +277,13 @@ function Compose() {
           </button>
         </div>
 
+        {aiConfigured && aiStatus?.source && (
+          <p className="mb-5 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+            {aiStatus.source === "gemini"
+              ? "AI generation is using your own Gemini API key."
+              : "AI generation is using the built-in AI."}
+          </p>
+        )}
         {!aiConfigured && (
           <p className="mb-5 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning">
             AI generation is not configured yet. Add your AI API key to enable generation. Everything
